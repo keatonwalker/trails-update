@@ -117,7 +117,13 @@ def getRenameFieldMap(featurePath, currentName, newName):
     """Create a field map that does a basic field rename."""
     tempMap = arcpy.FieldMap()
     tempMap.addInputField(featurePath, currentName)
-    tempMap.outputFieldSettyBetty(newName)
+
+    tempName = tempMap.outputField
+    tempName.name = newName
+    tempName.aliasName = newName
+    tempMap.outputField = tempName
+    # tempMap.outputFieldSettyBetty(newName)
+
     return tempMap
 
 
@@ -127,6 +133,8 @@ def featurePointCompare(srcLines, newLines):
     # Add lineId field to keep track of OBJECTID and aviod ESRI renaming
     lengthField = 'lineLength'
     lineIdField = 'lineId'
+    newLengthField = 'nlineLength'  # Unique field names needed for field map.
+    newLineIdField = 'nlineId'
     arcpy.AddField_management(srcLines.path, lengthField, 'DOUBLE')
     arcpy.CalculateField_management(srcLines.path,
                                     lengthField,
@@ -138,14 +146,14 @@ def featurePointCompare(srcLines, newLines):
                                     "!OBJECTID!",
                                     'PYTHON_9.3')
 
-    arcpy.AddField_management(newLines.path, lengthField, 'DOUBLE')
+    arcpy.AddField_management(newLines.path, newLengthField, 'DOUBLE')
     arcpy.CalculateField_management(newLines.path,
-                                    lengthField,
+                                    newLengthField,
                                     "!shape.length@METERS!",
                                     'PYTHON_9.3')
-    arcpy.AddField_management(newLines.path, lineIdField, 'LONG')
+    arcpy.AddField_management(newLines.path, newLineIdField, 'LONG')
     arcpy.CalculateField_management(newLines.path,
-                                    lineIdField,
+                                    newLineIdField,
                                     "!OBJECTID!",
                                     'PYTHON_9.3')
     # Convert lines to a centroid point that is on the line.
@@ -166,14 +174,14 @@ def featurePointCompare(srcLines, newLines):
     # Use field mapping to get line length difference
     lengthFM = arcpy.FieldMap()
     lengthFM.addInputField(srcPoints.path, lengthField)
-    lengthFM.addInputField(newPoints.path, lengthField)
+    lengthFM.addInputField(newPoints.path, newLengthField)
     lengthFM.mergeRule = 'Range'
     lengthFM.outputFieldSettyBetty('lengthDiff')
     # Perform some field renaming
     srcIdFM = getRenameFieldMap(srcPoints.path, lineIdField, 'srcId')
     srcLengthFM = getRenameFieldMap(srcPoints.path, lengthField, 'srcLength')
-    newIdFM = getRenameFieldMap(srcPoints.path, lineIdField, 'newId')
-    newLengthFM = getRenameFieldMap(newPoints.path, lengthField, 'newLength')
+    newIdFM = getRenameFieldMap(newPoints.path, newLineIdField, 'newId')
+    newLengthFM = getRenameFieldMap(newPoints.path, newLengthField, 'newLength')
     # Add order determines table field order
     pntJoinFMs.addFieldMap(srcIdFM)
     pntJoinFMs.addFieldMap(newIdFM)
@@ -195,7 +203,14 @@ def featurePointCompare(srcLines, newLines):
     arcpy.AddField_management(joinPoints.path, lengthPercentageField, 'FLOAT')
     arcpy.CalculateField_management(joinPoints.path,
                                     lengthPercentageField,
-                                    "!lengthDiff!/!srcLength! * 100",
+                                    "!lengthDiff!/!newLength! * 100",
+                                    'PYTHON_9.3')
+
+    joinDistField = 'joinDistPercent'
+    arcpy.AddField_management(joinPoints.path, joinDistField, 'FLOAT')
+    arcpy.CalculateField_management(joinPoints.path,
+                                    joinDistField,
+                                    "!joinDistance!/!newLength! * 100",
                                     'PYTHON_9.3')
 
 
@@ -207,6 +222,6 @@ if __name__ == '__main__':
 
     # x, y = getAngleDistStats(trailsFeature)
     # plotAngleDist(x, y)
-    srcLines = Feature(dataGdb, 'sgid')
-    newLines = Feature(dataGdb, 'nfs_project')
+    srcLines = Feature(dataGdb, 'SGID_Full')
+    newLines = Feature(dataGdb, 'TrailNFS_full_Project')
     featurePointCompare(srcLines, newLines)
