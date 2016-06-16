@@ -59,19 +59,41 @@ class Feature (object):
         return tempFeature
 
 
-def plotAngleDist(dists, angles):
+def plotAngleDist(dists, angles, smaAngles, emaAngles):
     """plot angle and distance values."""
-    plt.plot(dists, angles)
+    plt.figure(1)
+    plt.subplot(311)
+    plt.plot(dists, angles, 'b')
+    # plt.plot(dists, angles, 'bs')
+    plt.subplot(312)
+    plt.plot(dists, smaAngles, 'g')
+    # plt.plot(dists, smaAngles, 'g^')
+    plt.subplot(313)
+    plt.plot(dists, emaAngles, 'y')
     plt.show()
+
+
+def calcMovingAverage(currentAverage, newValue, lastValue, n):
+    """Simple moving average helper."""
+    return currentAverage + (newValue / float(n)) - (lastValue / float(n))
+
+
+def calcExponetialMovingAve(currentAverage, newValue, alpha):
+    """EMA helper."""
+    return alpha * newValue + (1 - alpha) * currentAverage
 
 
 def getAngleDistStats(trailsFeature):
     """Get angle and distance stats for a road feature."""
+    smaAngles = []
+    emaAngles = []
+    emaAlpha = 0.20
+    smaWindow = 20
     angles = []
     vertexDists = []
     outputVertexRows = []
     spatialRef = trailsFeature.spatialReference
-    outputGdb = r"C:\gis_working\fs trails\Temp.gdb"
+    outputGdb = outputWorkspace
     outputVertexName = 'vertex_' + uniqueRunNum
     anglePoints = Feature.createFeature(outputGdb, outputVertexName,
                                         spatialRef, 'POINT', outputFields)
@@ -97,6 +119,20 @@ def getAngleDistStats(trailsFeature):
                 if angle > 180:
                     angle = 360 - angle
                 angles.append(angle)
+                # Calculate the simple moving average of angles
+                if i + 1 <= smaWindow:
+                    newSma = sum(angles) / float(len(angles))
+                    smaAngles.append(newSma)
+                else:
+                    newSma = calcMovingAverage(smaAngles[i - 1], angle, smaAngles[i - smaWindow], smaWindow)
+                    smaAngles.append(newSma)
+                # Calculate exponential moving average of angles
+                if i == 0:
+                    emaAngles.append(angle)
+                else:
+                    newEma = calcExponetialMovingAve(emaAngles[i - 1], angle, emaAlpha)
+                    emaAngles.append(newEma)
+
                 vertexDist = line.measureOnLine(vertex, True)
                 vertexDists.append(vertexDist)
 
@@ -110,7 +146,7 @@ def getAngleDistStats(trailsFeature):
             vertexCursor.insertRow(row)
         del vertexCursor
 
-        return (vertexDists, angles)
+        return (vertexDists, angles, smaAngles, emaAngles)
 
 
 def getRenameFieldMap(featurePath, currentName, newName):
@@ -213,15 +249,171 @@ def featurePointCompare(srcLines, newLines):
                                     "!joinDistance!/!newLength! * 100",
                                     'PYTHON_9.3')
 
+    resultField = 'resultCategory'
+    arcpy.AddField_management(joinPoints.path, resultField, 'TEXT', field_length=30)
+
+    sameLayer = 'same'
+    sameSelection = '{} < 10 and {} < 3'.format(lengthPercentageField, joinDistField)
+    arcpy.MakeFeatureLayer_management(joinPoints.path, sameLayer, sameSelection)
+    arcpy.CalculateField_management(sameLayer,
+                                    resultField,
+                                    '"same"',
+                                    'PYTHON_9.3')
+
+    additionLayer = 'additions'
+    distFromSrcLines = 100
+    additionSelection = '{} > 20'.format(joinDistField)
+    arcpy.MakeFeatureLayer_management(joinPoints.path, additionLayer, additionSelection)
+    arcpy.SelectLayerByLocation_management(additionLayer,
+                                           'WITHIN_A_DISTANCE',
+                                           srcLines.path,
+                                           distFromSrcLines,
+                                           invert_spatial_relationship=True)
+    arcpy.CalculateField_management(additionLayer,
+                                    resultField,
+                                    '"addition"',
+                                    'PYTHON_9.3')
+    return joinPoints
+
+
+def getExtendPoints(lineEndPoint, targetPoint, referenceLine, targetLine):
+    """Extend referenceLine to the targetLine."""
+    touchLine = arcpy.Polyline(arcpy.Array([lineEndPoint.centroid, targetPoint.centroid]),
+                               referenceLine.spatialReference)
+    extendPoints = []
+    pnt33 = touchLine.positionAlongLine(0.33, True)
+    pntRef33 = referenceLine.snapToLine(pnt33)
+    pnt66 = touchLine.positionAlongLine(0.66, True)
+    pntRef66 = referenceLine.snapToLine(pnt66)
+    pnt90 = touchLine.positionAlongLine(0.90, True)
+    pntRef90 = referenceLine.snapToLine(pnt90)
+    newTargetPnt = targetLine.snapToLine(pntRef90)
+    extendPoints = [lineEndPoint, pntRef33, pntRef66, pntRef90, newTargetPnt]
+    return extendPoints
+
+
+def addNewLines(comparePoints, newLines, srcLines):
+    """Process addition lines and connect ones that are within a distance of source lines."""
+    newId = 'newId'
+    resultField = 'resultCategory'
+    additionCategory = 'addition'
+    touchingDist = 50
+    # Join result categories to the new lines
+    arcpy.JoinField_management(newLines.path, 'OBJECTID', comparePoints.path, newId, [resultField])
+    additionLayer = 'addLines'
+    additionSelection = "{} = '{}'".format(resultField, additionCategory)
+    arcpy.MakeFeatureLayer_management(newLines.path, additionLayer, additionSelection)
+    arcpy.SelectLayerByLocation_management(additionLayer,
+                                           'WITHIN_A_DISTANCE',
+                                           srcLines.path,
+                                           touchingDist,
+                                           invert_spatial_relationship=True)
+    arcpy.CalculateField_management(additionLayer,
+                                    resultField,
+                                    '"notouch_addition"',
+                                    'PYTHON_9.3')
+
+    arcpy.SelectLayerByLocation_management(additionLayer,
+                                           'WITHIN_A_DISTANCE',
+                                           srcLines.path,
+                                           touchingDist,
+                                           invert_spatial_relationship=False)
+    arcpy.CalculateField_management(additionLayer,
+                                    resultField,
+                                    '"touch_addition"',
+                                    'PYTHON_9.3')
+    # Erase newLine parts that are within touchingDist
+    srcLayer = 'srcLines'
+    arcpy.MakeFeatureLayer_management(srcLines.path, srcLayer)
+    arcpy.SelectLayerByLocation_management(srcLayer,
+                                           'WITHIN_A_DISTANCE',
+                                           additionLayer,  # newlines with touch_addition still selected
+                                           touchingDist,
+                                           invert_spatial_relationship=False)
+    eraseBuffer = Feature(outputWorkspace, 'srcEraseBuff_' + uniqueRunNum, srcLines.spatialReference)
+    arcpy.Buffer_analysis(srcLayer, eraseBuffer.path, touchingDist)
+    eraseBufferLayer = 'eraseBuffer'
+    arcpy.MakeFeatureLayer_management(eraseBuffer.path, eraseBufferLayer)
+    touchLayer = 'touchLines'
+    touchSelection = "{} = '{}'".format(resultField, 'touch_addition')
+    arcpy.MakeFeatureLayer_management(newLines.path, touchLayer, touchSelection)
+    erasedLines = Feature(outputWorkspace, 'erasedLines_' + uniqueRunNum, newLines.spatialReference)
+    arcpy.Erase_analysis(touchLayer, eraseBuffer.path, erasedLines.path)
+    erasedSingleLines = Feature(outputWorkspace, 'erasedSinglePart_' + uniqueRunNum, newLines.spatialReference)
+    arcpy.MultipartToSinglepart_management(erasedLines.path, erasedSingleLines.path)
+    # Update ereased lines to touch srcLines
+    srcTouchLayer = 'srcTouch'
+    arcpy.MakeFeatureLayer_management(srcLines.path, srcTouchLayer)
+    arcpy.SelectLayerByLocation_management(srcTouchLayer,
+                                           'WITHIN_A_DISTANCE',
+                                           erasedSingleLines.path,
+                                           touchingDist,
+                                           invert_spatial_relationship=False)
+    srcCursor = arcpy.da.SearchCursor(srcTouchLayer, 'SHAPE@')
+    srcTouchLines = [row[0] for row in srcCursor]
+    del srcCursor
+    startPointsDebug = []
+    i = 1
+    with arcpy.da.UpdateCursor(erasedSingleLines.path, 'SHAPE@') as eraseCursor:
+        for row in eraseCursor:
+            updateLine = row[0]
+            start = arcpy.PointGeometry(row[0].firstPoint, newLines.spatialReference)
+            end = arcpy.PointGeometry(row[0].lastPoint, newLines.spatialReference)
+            startPoints = []
+            endPoints = []
+
+            arcpy.Delete_management('refLine' + str(i))
+            # touchSelection = "{} = '{}'".format(resultField, 'touch_addition')
+            # refLayer = arcpy.MakeFeatureLayer_management(newLines.path, 'refLine' + str(i), touchSelection)
+            arcpy.SelectLayerByLocation_management(touchLayer,
+                                                   'INTERSECT',
+                                                   start,
+                                                   1)
+            refLine = arcpy.CopyFeatures_management(touchLayer, arcpy.Geometry())
+            for sl in srcTouchLines:
+                if start is None and end is None:
+                    break
+                if start is not None and start.distanceTo(sl) <= touchingDist + 2:  # + 1 for tolerance
+                    i += 1
+                    startPoints.extend(getExtendPoints(start, sl.snapToLine(start), refLine[0], sl))
+                    startPoints.reverse()
+                    # startPointsDebug.append(sl.snapToLine(start))
+                    start = None
+                if end is not None and end.distanceTo(sl) <= touchingDist + 2:
+                    endPoints.extend(getExtendPoints(end, sl.snapToLine(end), refLine[0], sl))
+                    # startPointsDebug.append(sl.snapToLine(end))
+                    i += 1
+                    end = None
+            if len(startPoints) > 0 or len(endPoints) > 0:
+                updatePoints = updateLine.getPart(0)
+                startPoints = [p.centroid for p in startPoints]
+                endPoints = [p.centroid for p in endPoints]
+                startPoints.extend(list(updatePoints))
+                startPoints.extend(endPoints)
+                uLine = arcpy.Polyline(arcpy.Array(startPoints), updateLine.spatialReference)
+                row[0] = uLine
+                eraseCursor.updateRow(row)
+
+    print i
+    # startPointsDebug = [arcpy.PointGeometry(p, newLines.spatialReference) for p in startPointsDebug]
+    # arcpy.CopyFeatures_management(startPointsDebug, os.path.join(outputWorkspace, 'tempStart_' + uniqueRunNum))
+
+    arcpy.Delete_management(additionLayer)
+    arcpy.Delete_management(srcLayer)
+    arcpy.Delete_management(eraseBufferLayer)
 
 if __name__ == '__main__':
-    print 'hello'
+    print uniqueRunNum
     dataGdb = r'C:\gis_working\fs trails\Temp.gdb'
     trailsFeature = Feature(dataGdb,
                             'One_NFS_trail')
 
-    # x, y = getAngleDistStats(trailsFeature)
-    # plotAngleDist(x, y)
+    # x, y, sma, ema = getAngleDistStats(trailsFeature)
+    # plotAngleDist(x, y, sma, ema)
+
     srcLines = Feature(dataGdb, 'SGID_Full')
-    newLines = Feature(dataGdb, 'TrailNFS_full_Project')
-    featurePointCompare(srcLines, newLines)
+    baseNewLines = Feature(dataGdb, 'NFS_full_base')
+    arcpy.CopyFeatures_management(baseNewLines.path, os.path.join(outputWorkspace, 'NFS_Full_' + uniqueRunNum))
+    newLines = Feature(outputWorkspace, 'NFS_Full_' + uniqueRunNum)
+    comparePoints = featurePointCompare(srcLines, newLines)
+    addNewLines(comparePoints, newLines, srcLines)
