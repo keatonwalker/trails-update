@@ -15,7 +15,7 @@ def setOutputFieldName(self, name):
 arcpy.FieldMap.outputFieldSettyBetty = setOutputFieldName
 
 uniqueRunNum = strftime("%Y%m%d_%H%M%S")
-outputWorkspace = r'C:\gis_working\fs trails\outputs.gdb'
+# outputWorkspace = r'C:\gis_working\fs trails\OutputsNfs.gdb'
 outputFields = (('SHAPE@', 'geometery'), ('angle', 'FLOAT'),
                 ('percent_len', 'FLOAT'), ('dist1', 'FLOAT'),
                 ('heading1', 'FLOAT'), ('dist2', 'FLOAT'),
@@ -289,6 +289,9 @@ def getExtendPoints(lineEndPoint, targetPoint, referenceLine, targetLine):
     pntRef90 = referenceLine.snapToLine(pnt90)
     newTargetPnt = targetLine.snapToLine(pntRef90)
     extendPoints = [lineEndPoint, pntRef33, pntRef66, pntRef90, newTargetPnt]
+    for p in extendPoints:
+        if lineEndPoint.distanceTo(p) > 100:  # remove points if they moved far away
+            return [lineEndPoint, newTargetPnt]
     return extendPoints
 
 
@@ -297,6 +300,8 @@ def addNewLines(comparePoints, newLines, srcLines):
     newId = 'newId'
     resultField = 'resultCategory'
     additionCategory = 'addition'
+    disconectedCategory = 'notouch_addition'
+    conectedCategory = 'touch_addition'
     touchingDist = 50
     # Join result categories to the new lines
     arcpy.JoinField_management(newLines.path, 'OBJECTID', comparePoints.path, newId, [resultField])
@@ -310,7 +315,7 @@ def addNewLines(comparePoints, newLines, srcLines):
                                            invert_spatial_relationship=True)
     arcpy.CalculateField_management(additionLayer,
                                     resultField,
-                                    '"notouch_addition"',
+                                    '"{}"'.format(disconectedCategory),
                                     'PYTHON_9.3')
 
     arcpy.SelectLayerByLocation_management(additionLayer,
@@ -320,7 +325,7 @@ def addNewLines(comparePoints, newLines, srcLines):
                                            invert_spatial_relationship=False)
     arcpy.CalculateField_management(additionLayer,
                                     resultField,
-                                    '"touch_addition"',
+                                    '"{}"'.format(conectedCategory),
                                     'PYTHON_9.3')
     # Erase newLine parts that are within touchingDist
     srcLayer = 'srcLines'
@@ -347,12 +352,10 @@ def addNewLines(comparePoints, newLines, srcLines):
     arcpy.SelectLayerByLocation_management(srcTouchLayer,
                                            'WITHIN_A_DISTANCE',
                                            erasedSingleLines.path,
-                                           touchingDist,
-                                           invert_spatial_relationship=False)
+                                           touchingDist)
     srcCursor = arcpy.da.SearchCursor(srcTouchLayer, 'SHAPE@')
     srcTouchLines = [row[0] for row in srcCursor]
     del srcCursor
-    startPointsDebug = []
     i = 1
     with arcpy.da.UpdateCursor(erasedSingleLines.path, 'SHAPE@') as eraseCursor:
         for row in eraseCursor:
@@ -361,10 +364,7 @@ def addNewLines(comparePoints, newLines, srcLines):
             end = arcpy.PointGeometry(row[0].lastPoint, newLines.spatialReference)
             startPoints = []
             endPoints = []
-
-            arcpy.Delete_management('refLine' + str(i))
-            # touchSelection = "{} = '{}'".format(resultField, 'touch_addition')
-            # refLayer = arcpy.MakeFeatureLayer_management(newLines.path, 'refLine' + str(i), touchSelection)
+            # Get the original geometry for the erase line
             arcpy.SelectLayerByLocation_management(touchLayer,
                                                    'INTERSECT',
                                                    start,
@@ -398,22 +398,142 @@ def addNewLines(comparePoints, newLines, srcLines):
     # startPointsDebug = [arcpy.PointGeometry(p, newLines.spatialReference) for p in startPointsDebug]
     # arcpy.CopyFeatures_management(startPointsDebug, os.path.join(outputWorkspace, 'tempStart_' + uniqueRunNum))
 
+    disconnectedLayer = 'disconectedAdd'
+    disSelection = "{} = '{}'".format(resultField, disconectedCategory)
+    arcpy.MakeFeatureLayer_management(newLines.path, disconnectedLayer, disSelection)
+    arcpy.Append_management(disconnectedLayer, erasedSingleLines.path, 'NO_TEST')
+
     arcpy.Delete_management(additionLayer)
+    arcpy.Delete_management(disconnectedLayer)
     arcpy.Delete_management(srcLayer)
     arcpy.Delete_management(eraseBufferLayer)
+    arcpy.Delete_management(touchLayer)
+
+    return erasedSingleLines
+
+
+def mergeAdditionLines(srcLines, addLines, fieldMap, updateSource):
+    """Merge and addLines and srcLines and map usefull fields."""
+    dataSourceField = 'UpdateSource'
+    arcpy.AddField_management(srcLines.path, dataSourceField, 'TEXT')
+    arcpy.AddField_management(addLines.path, dataSourceField, 'TEXT')
+    arcpy.CalculateField_management(addLines.path,
+                                    dataSourceField,
+                                    "'{} !{}!'".format(updateSource, 'OBJECTID'),
+                                    'PYTHON_9.3')
+    updateSrcFM = getRenameFieldMap(addLines.path, dataSourceField, dataSourceField)
+    fieldMap.addFieldMap(updateSrcFM)
+
+    arcpy.Append_management(addLines.path, srcLines.path, 'NO_TEST', fieldMap)
+
+
+def getCacheFieldMap(addLines):
+    """Get field map for Cache."""
+    srcNameField = 'PrimaryName'
+    addNameField = 'primarynam'
+    # Create field mappings
+    additionFMs = arcpy.FieldMappings()
+    # Perform some field renaming
+    nameFM = getRenameFieldMap(addLines.path, addNameField, srcNameField)
+    trailIdFM = getRenameFieldMap(addLines.path, 'trialid', 'TrlID')
+    descFM = getRenameFieldMap(addLines.path, 'descriptio', 'Description')
+    desgUsesFM = getRenameFieldMap(addLines.path, 'designated', 'DesignatedUses')
+    surfTypeFM = getRenameFieldMap(addLines.path, 'surfacetyp', 'surfacetype')
+    motoFM = getRenameFieldMap(addLines.path, 'motorizedp', 'MotorizedProhibited')
+    maintainFM = getRenameFieldMap(addLines.path, 'primarymai', 'PrimaryMaint')
+    adaFM = getRenameFieldMap(addLines.path, 'adaaccessi', 'ADAAccessible')
+
+    additionFMs.addFieldMap(trailIdFM)
+    additionFMs.addFieldMap(descFM)
+    additionFMs.addFieldMap(desgUsesFM)
+    additionFMs.addFieldMap(nameFM)
+    additionFMs.addFieldMap(surfTypeFM)
+    additionFMs.addFieldMap(motoFM)
+    additionFMs.addFieldMap(maintainFM)
+    additionFMs.addFieldMap(adaFM)
+
+    return additionFMs
+
+
+def getUtahFieldMap(addLines):
+    """Get field map for Utah."""
+    srcNameField = 'PrimaryName'
+    addNameField = 'Name'
+    # Create field mappings
+    additionFMs = arcpy.FieldMappings()
+    # Perform some field renaming
+    nameFM = getRenameFieldMap(addLines.path, addNameField, srcNameField)
+    sourceFM = getRenameFieldMap(addLines.path, 'SourceCity', 'DataSource')
+    surfTypeFM = getRenameFieldMap(addLines.path, 'Surface', 'SurfaceType')
+    commentFM = getRenameFieldMap(addLines.path, 'Category1', 'Comments')
+
+    additionFMs.addFieldMap(nameFM)
+    additionFMs.addFieldMap(sourceFM)
+    additionFMs.addFieldMap(surfTypeFM)
+    additionFMs.addFieldMap(commentFM)
+
+    return additionFMs
+
+
+def getWasatchFieldMap(addLines):
+    """Get field map for Wasatch."""
+    srcNameField = 'PrimaryName'
+    addNameField = 'NAME'
+    # Create field mappings
+    additionFMs = arcpy.FieldMappings()
+    # Perform some field renaming
+    nameFM = getRenameFieldMap(addLines.path, addNameField, srcNameField)
+    surfTypeFM = getRenameFieldMap(addLines.path, 'Surface', 'SurfaceType')
+    desgUsesFM = getRenameFieldMap(addLines.path, 'Use_', 'DesignatedUses')
+    maintainFM = getRenameFieldMap(addLines.path, 'Jurisdicti', 'PrimaryMaint')
+    statusFM = getRenameFieldMap(addLines.path, 'Status', 'Status')
+
+    additionFMs.addFieldMap(nameFM)
+    additionFMs.addFieldMap(surfTypeFM)
+    additionFMs.addFieldMap(desgUsesFM)
+    additionFMs.addFieldMap(maintainFM)
+    additionFMs.addFieldMap(statusFM)
+
+    return additionFMs
+
+
+def getNfsFieldMap(addLines):
+    """Get field map for Wasatch."""
+    srcNameField = 'PrimaryName'
+    addNameField = 'TRAIL_NAME'
+    # Create field mappings
+    additionFMs = arcpy.FieldMappings()
+    # Perform some field renaming
+    nameFM = getRenameFieldMap(addLines.path, addNameField, srcNameField)
+    surfTypeFM = getRenameFieldMap(addLines.path, 'TRAIL_TYPE', 'SurfaceType')
+    trailIdFM = getRenameFieldMap(addLines.path, 'TRAIL_NO', 'TrailID')
+    sourceFM = getRenameFieldMap(addLines.path, 'ATTRIBUTESUBSET', 'DataSource')
+
+    additionFMs.addFieldMap(nameFM)
+    additionFMs.addFieldMap(surfTypeFM)
+    additionFMs.addFieldMap(trailIdFM)
+    additionFMs.addFieldMap(sourceFM)
+
+    return additionFMs
+
 
 if __name__ == '__main__':
     print uniqueRunNum
-    dataGdb = r'C:\gis_working\fs trails\Temp.gdb'
-    trailsFeature = Feature(dataGdb,
-                            'One_NFS_trail')
+    global outputWorkspace
+    outputWorkspace = r'C:\gis_working\fs trails\OutputsNfs.gdb'
+    dataGdb = r'C:\gis_working\fs trails\sourceData.gdb'
+    # trailsFeature = Feature(dataGdb, 'One_NFS_trail')
 
     # x, y, sma, ema = getAngleDistStats(trailsFeature)
     # plotAngleDist(x, y, sma, ema)
 
-    srcLines = Feature(dataGdb, 'SGID_Full')
+    baseSrcLines = Feature(dataGdb, 'SGID_Cache_Utah_Was')
+    srcLines = Feature(outputWorkspace, baseSrcLines.name + '_' + uniqueRunNum, baseSrcLines.spatialReference)
+    arcpy.CopyFeatures_management(baseSrcLines.path, srcLines.path)
     baseNewLines = Feature(dataGdb, 'NFS_full_base')
-    arcpy.CopyFeatures_management(baseNewLines.path, os.path.join(outputWorkspace, 'NFS_Full_' + uniqueRunNum))
-    newLines = Feature(outputWorkspace, 'NFS_Full_' + uniqueRunNum)
+    newLines = Feature(outputWorkspace, baseNewLines.name + '_' + uniqueRunNum, baseNewLines.spatialReference)
+    arcpy.CopyFeatures_management(baseNewLines.path, newLines.path)
+
     comparePoints = featurePointCompare(srcLines, newLines)
-    addNewLines(comparePoints, newLines, srcLines)
+    additionLines = addNewLines(comparePoints, newLines, srcLines)
+    mergeAdditionLines(srcLines, additionLines, getNfsFieldMap(additionLines), 'NFS')
