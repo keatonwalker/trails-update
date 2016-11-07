@@ -25,14 +25,21 @@ outputFields = (('SHAPE@', 'geometery'), ('angle', 'FLOAT'),
 class Feature (object):
     """Store usefull feature class information."""
 
-    def __init__(self, workspace, name, spatialRef=None):
+    def __init__(self, workspace, name, spatialRef=None, objectId=None):
         """constructor."""
         self.workspace = workspace
         self.name = name
         self.path = os.path.join(workspace, name)
         self.spatialReference = spatialRef
+        self._objectId = objectId
         if self.spatialReference is None:
             self.spatialReference = arcpy.Describe(self.path).spatialReference
+
+    def getObjectIdField(self):
+        if self._objectId is None:
+            self._objectId = arcpy.Describe(self.path).OIDFieldName
+
+        return self._objectId
 
     def createThisFeature(self, goeType, fieldList=[]):
         """Create a feature with instance fields."""
@@ -179,7 +186,7 @@ def featurePointCompare(srcLines, newLines):
     arcpy.AddField_management(srcLines.path, lineIdField, 'LONG')
     arcpy.CalculateField_management(srcLines.path,
                                     lineIdField,
-                                    "!OBJECTID!",
+                                    "!{}!".format(srcLines.getObjectIdField()),
                                     'PYTHON_9.3')
 
     arcpy.AddField_management(newLines.path, newLengthField, 'DOUBLE')
@@ -190,7 +197,7 @@ def featurePointCompare(srcLines, newLines):
     arcpy.AddField_management(newLines.path, newLineIdField, 'LONG')
     arcpy.CalculateField_management(newLines.path,
                                     newLineIdField,
-                                    "!OBJECTID!",
+                                    "!{}!".format(newLines.getObjectIdField()),
                                     'PYTHON_9.3')
     # Convert lines to a centroid point that is on the line.
     srcPoints = Feature(outputWorkspace,
@@ -304,7 +311,11 @@ def addNewLines(comparePoints, newLines, srcLines):
     conectedCategory = 'touch_addition'
     touchingDist = 50
     # Join result categories to the new lines
-    arcpy.JoinField_management(newLines.path, 'OBJECTID', comparePoints.path, newId, [resultField])
+    arcpy.JoinField_management(newLines.path,
+                               '{}'.format(newLines.getObjectIdField()),
+                               comparePoints.path,
+                               newId,
+                               [resultField])
     additionLayer = 'addLines'
     additionSelection = "{} = '{}'".format(resultField, additionCategory)
     arcpy.MakeFeatureLayer_management(newLines.path, additionLayer, additionSelection)
@@ -344,7 +355,9 @@ def addNewLines(comparePoints, newLines, srcLines):
     arcpy.MakeFeatureLayer_management(newLines.path, touchLayer, touchSelection)
     erasedLines = Feature(outputWorkspace, 'erasedLines_' + uniqueRunNum, newLines.spatialReference)
     arcpy.Erase_analysis(touchLayer, eraseBuffer.path, erasedLines.path)
-    erasedSingleLines = Feature(outputWorkspace, 'erasedSinglePart_' + uniqueRunNum, newLines.spatialReference)
+    erasedSingleLines = Feature(outputWorkspace,
+                                'erasedSinglePart_' + uniqueRunNum,
+                                newLines.spatialReference)
     arcpy.MultipartToSinglepart_management(erasedLines.path, erasedSingleLines.path)
     # Update ereased lines to touch srcLines
     srcTouchLayer = 'srcTouch'
@@ -394,10 +407,6 @@ def addNewLines(comparePoints, newLines, srcLines):
                 row[0] = uLine
                 eraseCursor.updateRow(row)
 
-    print i
-    # startPointsDebug = [arcpy.PointGeometry(p, newLines.spatialReference) for p in startPointsDebug]
-    # arcpy.CopyFeatures_management(startPointsDebug, os.path.join(outputWorkspace, 'tempStart_' + uniqueRunNum))
-
     disconnectedLayer = 'disconectedAdd'
     disSelection = "{} = '{}'".format(resultField, disconectedCategory)
     arcpy.MakeFeatureLayer_management(newLines.path, disconnectedLayer, disSelection)
@@ -415,11 +424,13 @@ def addNewLines(comparePoints, newLines, srcLines):
 def mergeAdditionLines(srcLines, addLines, fieldMap, updateSource):
     """Merge and addLines and srcLines and map usefull fields."""
     dataSourceField = 'UpdateSource'
+    newLineIdField = 'nlineId'
     arcpy.AddField_management(srcLines.path, dataSourceField, 'TEXT')
     arcpy.AddField_management(addLines.path, dataSourceField, 'TEXT')
     arcpy.CalculateField_management(addLines.path,
                                     dataSourceField,
-                                    "'{} !{}!'".format(updateSource, 'OBJECTID'),
+                                    "'{} !{}!'".format(updateSource,
+                                                       '{}'.format(newLineIdField)),
                                     'PYTHON_9.3')
     updateSrcFM = getRenameFieldMap(addLines.path, dataSourceField, dataSourceField)
     fieldMap.addFieldMap(updateSrcFM)
@@ -498,7 +509,7 @@ def getWasatchFieldMap(addLines):
 
 
 def getNfsFieldMap(addLines):
-    """Get field map for Wasatch."""
+    """Get field map for NFS."""
     srcNameField = 'PrimaryName'
     addNameField = 'TRAIL_NAME'
     # Create field mappings
@@ -517,23 +528,47 @@ def getNfsFieldMap(addLines):
     return additionFMs
 
 
+def getBlmFieldMap(addLines):
+    """Get field map for BLM."""
+    srcNameField = 'PrimaryName'
+    addNameField = 'ROUTE_PRMR'
+    # Create field mappings
+    additionFMs = arcpy.FieldMappings()
+    # Perform some field renaming
+    nameFM = getRenameFieldMap(addLines.path, addNameField, srcNameField)
+    sourceFM = getRenameFieldMap(addLines.path, 'COORD_SRC2', 'DataSource')
+    commentsFM = getRenameFieldMap(addLines.path, 'COMMENTS', 'Comments')
+    usesFM = getRenameFieldMap(addLines.path, 'DesignatedUses', 'DesignatedUses')
+
+    additionFMs.addFieldMap(nameFM)
+    additionFMs.addFieldMap(sourceFM)
+    additionFMs.addFieldMap(commentsFM)
+    additionFMs.addFieldMap(usesFM)
+
+    return additionFMs
+
+
 if __name__ == '__main__':
-    print uniqueRunNum
+    print 'Run number: {}'.format(uniqueRunNum)
     global outputWorkspace
-    outputWorkspace = r'C:\gis_working\fs trails\OutputsNfs.gdb'
-    dataGdb = r'C:\gis_working\fs trails\sourceData.gdb'
+    outputWorkspace = r'C:\GisWork\Trails\BlmTrailsOutput.gdb'
+    dataGdb = r'C:\GisWork\Trails\BLM Trails\SourceData.gdb'
     # trailsFeature = Feature(dataGdb, 'One_NFS_trail')
 
     # x, y, sma, ema = getAngleDistStats(trailsFeature)
     # plotAngleDist(x, y, sma, ema)
 
-    baseSrcLines = Feature(dataGdb, 'SGID_Cache_Utah_Was')
-    srcLines = Feature(outputWorkspace, baseSrcLines.name + '_' + uniqueRunNum, baseSrcLines.spatialReference)
+    baseSrcLines = Feature(dataGdb, 'SGID_Trails')
+    srcLines = Feature(outputWorkspace,
+                       baseSrcLines.name + '_' + uniqueRunNum,
+                       baseSrcLines.spatialReference)
     arcpy.CopyFeatures_management(baseSrcLines.path, srcLines.path)
-    baseNewLines = Feature(dataGdb, 'NFS_full_base')
-    newLines = Feature(outputWorkspace, baseNewLines.name + '_' + uniqueRunNum, baseNewLines.spatialReference)
+    baseNewLines = Feature(dataGdb, 'BLM_Trails_1part')
+    newLines = Feature(outputWorkspace,
+                       baseNewLines.name + '_' + uniqueRunNum,
+                       baseNewLines.spatialReference)
     arcpy.CopyFeatures_management(baseNewLines.path, newLines.path)
 
     comparePoints = featurePointCompare(srcLines, newLines)
     additionLines = addNewLines(comparePoints, newLines, srcLines)
-    mergeAdditionLines(srcLines, additionLines, getNfsFieldMap(additionLines), 'NFS')
+    mergeAdditionLines(srcLines, additionLines, getBlmFieldMap(additionLines), 'BLM')
